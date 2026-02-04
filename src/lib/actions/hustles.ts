@@ -3,7 +3,14 @@
 import { createClient } from '@/lib/supabase/server';
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
+import { startOfMonth, endOfMonth, format } from 'date-fns';
 import type { Hustle } from '@/types/database';
+
+export type HustleWithStats = Hustle & {
+  monthlyTotal: number;
+  allTimeTotal: number;
+  entryCount: number;
+};
 
 const hustleSchema = z.object({
   name: z.string().min(1, 'Name is required').max(50, 'Name too long'),
@@ -147,4 +154,60 @@ export async function deleteHustle(hustleId: string) {
   revalidatePath('/log');
   revalidatePath('/dashboard');
   return { success: true };
+}
+
+export async function getHustlesWithStats(): Promise<HustleWithStats[]> {
+  const supabase = await createClient();
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    return [];
+  }
+
+  // Get all active hustles
+  const { data: hustles } = await supabase
+    .from('hustles')
+    .select('*')
+    .eq('user_id', user.id)
+    .eq('is_active', true)
+    .order('name');
+
+  if (!hustles || hustles.length === 0) {
+    return [];
+  }
+
+  // Get all income entries for this user
+  const { data: entries } = await supabase
+    .from('income_entries')
+    .select('hustle_id, amount, date')
+    .eq('user_id', user.id);
+
+  const now = new Date();
+  const monthStart = format(startOfMonth(now), 'yyyy-MM-dd');
+  const monthEnd = format(endOfMonth(now), 'yyyy-MM-dd');
+
+  // Calculate stats for each hustle
+  const hustlesWithStats: HustleWithStats[] = hustles.map((hustle) => {
+    const hustleEntries = (entries || []).filter((e) => e.hustle_id === hustle.id);
+
+    const allTimeTotal = hustleEntries.reduce((sum, e) => sum + Number(e.amount), 0);
+
+    const monthlyEntries = hustleEntries.filter(
+      (e) => e.date >= monthStart && e.date <= monthEnd
+    );
+    const monthlyTotal = monthlyEntries.reduce((sum, e) => sum + Number(e.amount), 0);
+
+    return {
+      ...hustle,
+      monthlyTotal,
+      allTimeTotal,
+      entryCount: hustleEntries.length,
+    } as HustleWithStats;
+  });
+
+  // Sort by monthly total (highest first)
+  return hustlesWithStats.sort((a, b) => b.monthlyTotal - a.monthlyTotal);
 }
